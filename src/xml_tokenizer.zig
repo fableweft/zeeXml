@@ -8,9 +8,73 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         line: usize,
         column: usize,
         pos: usize,
+        last_detailed_error: ?DetailedError = null,
+
+        pub const TokenizerError = error{
+            UnexpectedEOF,
+            InvalidToken,
+            InvalidUTF8,
+            InvalidCharacter,
+            MalformedComment,
+            MalformedProcessingInstruction,
+            ContentTooLong,
+            UnterminatedCDATASection,
+            InvalidEntity,
+            UnterminatedEntity,
+        };
+
+        pub const DetailedError = struct {
+            kind: TokenizerError,
+            line: usize,
+            column: usize,
+            message: []const u8,
+            context: ?[]const u8,
+
+            pub fn format(self: DetailedError) void {
+                std.debug.print("XML error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
+                if (self.context) |ctx| {
+                    std.debug.print("Context: \"{s}\"\n", .{ctx});
+                }
+            }
+        };
+
+        pub fn getErrorContext(self: *Self, window_size: usize) ?[]const u8 {
+            if (self.buffer.items.len == 0) return null;
+
+            const start = @max(0, self.pos - window_size);
+            const end = @min(self.buffer.items.len, self.pos + window_size);
+
+            return self.buffer.items[start..end];
+        }
+
+        pub fn emitError(self: *Self, kind: TokenizerError, message: []const u8) void {
+            self.last_detailed_error = DetailedError{
+                .kind = kind,
+                .line = self.line,
+                .column = self.column,
+                .message = message,
+                .context = self.getErrorContext(20),
+            };
+        }
+
+        pub const Attribute = struct {
+            name: []u8,
+            value: []u8,
+        };
+
+        pub const Token = union(enum) {
+            start_tag: struct { name: []u8, attributes: []Attribute },
+            end_tag: []u8,
+            self_closing_tag: struct { name: []u8, attributes: []Attribute },
+            text: []u8,
+            comment: []u8,
+            pi: struct { target: []u8, data: []u8 },
+            cdata: []u8,
+            doctype: []u8,
+            xml_declaration: struct { version: []u8, encoding: ?[]u8, standalone: ?[]u8 },
+        };
 
         const Self = @This();
-
         pub const default_chunk_size = 8192;
 
         pub fn init(allocator: std.mem.Allocator, underlying_reader: UnderlyingReader) !Self {
@@ -55,6 +119,125 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
 
         pub fn getCurrentBufferContents(self: *Self) []const u8 {
             return self.buffer.items;
+        }
+
+        // get the next token from the XML stream or return null at EOF
+        pub fn nextToken(self: *Self) !?Token {
+            try self.skipWhitespace();
+            if (self.pos >= self.buffer.items.len) {
+                const has_more_data = try self.readNextChunk();
+                if (!has_more_data)
+                    return null; // end of input my guy just come back lol
+            }
+
+            const c = self.buffer.items[self.pos];
+            if (c == '<') { // is start of a tag or special construct
+                self.pos += 1;
+                self.column += 1;
+                if (self.pos >= self.buffer.items.len) {
+                    const has_more_data = try self.readNextChunk();
+                    if (!has_more_data) {
+                        self.emitError(TokenizerError.UnexpectedEOF, "Unexpected end of file while parsing tag");
+                        return TokenizerError.UnexpectedEOF; // legit EOF mid tag
+                    }
+                }
+                if (self.pos >= self.buffer.items.len) {
+                    self.emitError(TokenizerError.UnexpectedEOF, "Unexpected end of file after '<'");
+                    return TokenizerError.UnexpectedEOF; // shouldnt happen after read
+                }
+                switch (self.buffer.items[self.pos]) {
+                    '/' => { // end tag
+                        self.pos += 1;
+                        self.column += 1;
+                        return try self.parseEndTag();
+                    },
+                    '!' => { // comment or other special token
+                        self.pos += 1;
+                        self.column += 1;
+                        if (self.pos + 7 < self.buffer.items.len and std.mem.eql(u8, self.buffer.items[self.pos .. self.pos + 7], "[CDATA[")) {
+                            self.pos += 7;
+                            self.column += 7;
+                            return try self.parseCdata();
+                        } else if (self.pos + 7 < self.buffer.items.len and std.mem.eql(u8, self.buffer.items[self.pos .. self.pos + 7], "DOCTYPE")) {
+                            self.pos += 7;
+                            self.column += 7;
+                            return try self.parseDoctype();
+                        } else if (self.pos + 1 < self.buffer.items.len and self.buffer.items[self.pos] == '-' and self.buffer.items[self.pos + 1] == '-') {
+                            self.pos += 2; // skip <!--
+                            self.column += 2;
+                            return try self.parseComment();
+                        }
+                        self.emitError(TokenizerError.InvalidToken, "Invalid character after '<'");
+                        return TokenizerError.InvalidToken;
+                    },
+                    '?' => { // processing instruction
+                        self.pos += 1;
+                        self.column += 1;
+                        return try self.parsePi();
+                    },
+                    else => return try self.parseStartTag(), // start or self closing tag
+                }
+            } else {
+                return try self.parseText(); // text content
+            }
+        }
+
+        pub fn skipWhitespace(self: *Self) !void {
+            var pending_cr = false;
+            while (true) {
+                if (self.pos >= self.buffer.items.len) {
+                    const has_more_data = try self.readNextChunk();
+                    if (!has_more_data)
+                        break;
+                    // if the prev chunk ended with a \r and the new chunk starts with \n skip it
+                    if (pending_cr and self.buffer.items[self.pos] == '\n') {
+                        self.pos += 1;
+                        pending_cr = false;
+                    }
+                    continue;
+                }
+                const c = self.buffer.items[self.pos];
+                if (!isXmlWhitespace(c)) { // if this char is not whitespace finalize any pending cr adjustments and exit
+                    if (pending_cr) {
+                        self.column = 1;
+                    }
+                    return;
+                }
+                self.pos += 1;
+                switch (c) {
+                    ' ', '\t' => {
+                        self.column += 1;
+                        pending_cr = false;
+                    },
+                    '\n' => {
+                        // if a pending CR then this \n is part of a crlf sequence
+                        if (!pending_cr) {
+                            self.line += 1;
+                            self.column = 1;
+                        } else {
+                            pending_cr = false;
+                        }
+                    },
+                    '\r' => {
+                        self.line += 1;
+                        self.column = 1;
+                        pending_cr = true;
+                        // check if the next char in the same chunk is \n
+                        if (self.pos < self.buffer.items.len and self.buffer.items[self.pos] == '\n') {
+                            self.pos += 1;
+                            pending_cr = false;
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
+        }
+
+        pub fn isXmlWhitespace(char: u8) bool {
+            return switch (char) {
+                ' ', '\t', '\n', '\r' => true,
+                else => false,
+            };
         }
     };
 }

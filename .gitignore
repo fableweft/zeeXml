@@ -22,3 +22,4 @@
 *.swp
 *.swo
 *.sublime-workspace
+.ropeproject
