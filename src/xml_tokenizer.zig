@@ -24,27 +24,42 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             UnterminatedEntity,
         };
 
+        pub const ErrorContext = struct {
+            context: []const u8,
+            error_offset: usize,
+        };
+
         pub const DetailedError = struct {
             kind: TokenizerError,
             line: usize,
             column: usize,
             message: []const u8,
-            context: ?[]const u8,
+            context: ?ErrorContext,
 
             pub fn format(self: DetailedError) void {
                 std.debug.print("XML error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
                 if (self.context) |ctx| {
-                    std.debug.print("Context: \"{s}\"\n", .{ctx});
+                    std.debug.print("Context: \"", .{});
+                    for (ctx.context, 0..) |char, i| {
+                        if (i == ctx.error_offset) {
+                            std.debug.print("[{c}]", .{char});
+                        } else {
+                            std.debug.print("{c}", .{char});
+                        }
+                    }
+                    std.debug.print("\"\n", .{});
                 }
             }
         };
 
-        pub fn getErrorContext(self: *Self, window_size: usize) ?[]const u8 {
+        pub fn getErrorContext(self: *Self, window_size: usize) ?ErrorContext {
             if (self.buffer.items.len == 0) return null;
             const pos = @min(self.pos, self.buffer.items.len);
             const start = if (pos > window_size) pos - window_size else 0;
             const end = @min(self.buffer.items.len, pos + window_size);
-            return self.buffer.items[start..end];
+            const context = self.buffer.items[start..end];
+            const error_offset = pos - start; // offset of error within contex
+            return ErrorContext{ .context = context, .error_offset = error_offset };
         }
 
         pub fn emitError(self: *Self, kind: TokenizerError, message: []const u8) void {
@@ -53,7 +68,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 .line = self.line,
                 .column = self.column,
                 .message = message,
-                .context = self.getErrorContext(20),
+                .context = self.getErrorContext(50),
             };
         }
 
@@ -319,6 +334,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
 
         pub fn parseEndTag(self: *Self) !Token {
             const name = try self.readName();
+            errdefer self.allocator.free(name);
             try self.skipWhitespace();
 
             if (self.pos >= self.buffer.items.len) {
@@ -394,7 +410,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
 
         pub fn parsePi(self: *Self) !Token {
             const target = try self.readName();
-            errdefer self.allocator.free(target); // free target on incase of error
+            errdefer self.allocator.free(target); // free target incase of error
             try self.skipWhitespace();
             var data = std.ArrayList(u8).init(self.allocator);
             errdefer data.deinit();
@@ -592,26 +608,47 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         pub fn readName(self: *Self) ![]u8 {
             var name = std.ArrayList(u8).init(self.allocator);
             errdefer name.deinit();
-            const first_cp_u32 = try self.decodeUtf8();
-            if (first_cp_u32 > 0x10FFFF) { // check if valid unicode code point
-                self.emitError(TokenizerError.InvalidCharacter, "Invalid Unicode code point");
-                return TokenizerError.InvalidCharacter;
-            }
-            const first_cp: u21 = @intCast(first_cp_u32); // safe cast to u21 since we verified the range alrady befor
-            if (!isNameStartChar(first_cp)) {
-                self.emitError(TokenizerError.InvalidToken, "Invalid starting character for XML name");
-                return TokenizerError.InvalidToken;
-            }
-            const first_char_len = std.unicode.utf8CodepointSequenceLength(first_cp) catch unreachable;
-            try name.appendSlice(self.buffer.items[self.pos - first_char_len .. self.pos]);
-            self.advancePosition(first_cp);
 
+            // ensure we have data n read first char
             while (true) {
+                if (self.pos >= self.buffer.items.len) {
+                    const has_more_data = try self.readNextChunk();
+                    if (!has_more_data) {
+                        self.emitError(TokenizerError.UnexpectedEOF, "Unexpected end of file while reading name");
+                        return TokenizerError.UnexpectedEOF;
+                    }
+                }
+                const first_cp_u32 = try self.decodeUtf8();
+                if (first_cp_u32 > 0x10FFFF) {
+                    self.emitError(TokenizerError.InvalidCharacter, "Invalid Unicode code point");
+                    return TokenizerError.InvalidCharacter;
+                }
+                const first_cp: u21 = @intCast(first_cp_u32);
+                if (!isNameStartChar(first_cp)) {
+                    self.emitError(TokenizerError.InvalidToken, "Invalid starting character for XML name");
+                    return TokenizerError.InvalidToken;
+                }
+                const first_char_len = std.unicode.utf8CodepointSequenceLength(first_cp) catch unreachable;
+                try name.appendSlice(self.buffer.items[self.pos - first_char_len .. self.pos]);
+                self.advancePosition(first_cp);
+                break;
+            }
+
+            // read subsequent chars
+            while (true) {
+                if (self.pos >= self.buffer.items.len) {
+                    const has_more_data = try self.readNextChunk();
+                    if (!has_more_data) {
+                        break; // end of input so name is complete
+                    }
+                }
                 const saved_pos = self.pos;
                 const cp_u32 = self.decodeUtf8() catch |err| {
-                    if (err == TokenizerError.UnexpectedEOF) break;
-                    self.emitError(TokenizerError.InvalidUTF8, "Invalid UTF-8 sequence in name");
-                    return TokenizerError.InvalidUTF8;
+                    if (err == TokenizerError.InvalidUTF8) {
+                        self.emitError(TokenizerError.InvalidUTF8, "Invalid UTF-8 sequence in name");
+                        return TokenizerError.InvalidUTF8;
+                    }
+                    return err;
                 };
                 if (cp_u32 > 0x10FFFF) {
                     self.emitError(TokenizerError.InvalidCharacter, "Invalid Unicode code point");

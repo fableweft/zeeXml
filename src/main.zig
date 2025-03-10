@@ -3,20 +3,20 @@ const Tokenizer = @import("xml_tokenizer.zig").xml_tokenizer(std.fs.File.Reader)
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
-    defer {
-        const leaks = gpa.deinit();
-        if (leaks == .leak) {
-            std.debug.print("Memory leaks detected!\n", .{});
-        } else {
-            std.debug.print("No memory leaks.\n", .{});
-        }
-    }
+    // defer {
+    //     const leaks = gpa.deinit();
+    //     if (leaks == .leak) {
+    //         std.debug.print("Memory leaks detected!\n", .{});
+    //     } else {
+    //         std.debug.print("No memory leaks.\n", .{});
+    //     }
+    // }
     const allocator = gpa.allocator();
 
     var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
     defer xml_files_dir.close();
 
-    const file = try xml_files_dir.openFile("basic-structure.xml", .{});
+    const file = try xml_files_dir.openFile("test_all.xml", .{});
     defer file.close();
 
     const reader = file.reader();
