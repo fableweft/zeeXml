@@ -383,6 +383,8 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         pub fn parseComment(self: *Self) !Token {
             var content = std.ArrayList(u8).init(self.allocator);
             errdefer content.deinit();
+            var last_cp: ?u21 = null; // track the previous code point
+
             while (true) {
                 if (self.pos + 2 >= self.buffer.items.len) {
                     const has_more_data = try self.readNextChunk();
@@ -403,17 +405,24 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
 
                 const saved_pos = self.pos;
                 const cp = try self.decodeUtf8();
+                // check --
+                if (last_cp == '-' and cp == '-') {
+                    self.emitError(TokenizerError.MalformedComment, "Invalid '--' within comment");
+                    return TokenizerError.MalformedComment;
+                }
                 try content.appendSlice(self.buffer.items[saved_pos..self.pos]);
                 self.advancePosition(cp);
+                last_cp = cp;
             }
         }
 
         pub fn parsePi(self: *Self) !Token {
             const target = try self.readName();
-            errdefer self.allocator.free(target); // free target incase of error
+            errdefer self.allocator.free(target); // free target in case of error
             try self.skipWhitespace();
             var data = std.ArrayList(u8).init(self.allocator);
             errdefer data.deinit();
+            var last_cp: ?u21 = null; // track the previous code point
 
             while (true) {
                 if (self.pos + 1 >= self.buffer.items.len) {
@@ -429,7 +438,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                     self.column += 2;
                     const data_slice = try data.toOwnedSlice();
                     if (std.mem.eql(u8, target, "xml")) {
-                        // Parse XML declaration attributes
+                        // parse xml declaration attributes
                         var version: []u8 = undefined;
                         var encoding: ?[]u8 = null;
                         var standalone: ?[]u8 = null;
@@ -462,8 +471,14 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
 
                 const saved_pos = self.pos;
                 const cp = try self.decodeUtf8();
+                // check for ?>
+                if (last_cp == '?' and cp == '>') {
+                    self.emitError(TokenizerError.MalformedProcessingInstruction, "Invalid '?>' within processing instruction data");
+                    return TokenizerError.MalformedProcessingInstruction;
+                }
                 try data.appendSlice(self.buffer.items[saved_pos..self.pos]);
                 self.advancePosition(cp);
+                last_cp = cp; // update last code point
             }
         }
 
@@ -526,8 +541,8 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         }
 
         const Range = struct {
-            start: u32,
-            end: u32,
+            start: u21,
+            end: u21,
         };
 
         // ranges for name start chars
@@ -576,7 +591,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             .{ .start = 0x10000, .end = 0xEFFFF },
         };
 
-        fn isInRanges(code_point: u32, ranges: []const Range) bool {
+        fn isInRanges(code_point: u21, ranges: []const Range) bool {
             for (ranges) |range| {
                 if (code_point >= range.start and code_point <= range.end) {
                     return true;
@@ -585,23 +600,36 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             return false;
         }
 
-        pub fn isNameStartChar(code_point: u32) bool {
+        pub fn isNameStartChar(code_point: u21) bool {
             return isInRanges(code_point, nameStartCharRanges);
         }
 
-        pub fn isNameChar(code_point: u32) bool {
+        pub fn isNameChar(code_point: u21) bool {
             return isInRanges(code_point, nameCharRanges);
         }
 
-        fn decodeUtf8(self: *Self) !u32 {
+        fn decodeUtf8(self: *Self) TokenizerError!u21 {
             if (self.pos >= self.buffer.items.len) {
                 self.emitError(TokenizerError.InvalidToken, "Unexpected end of input while decoding Utf8");
                 return TokenizerError.UnexpectedEOF;
             }
             var it = std.unicode.Utf8Iterator{ .bytes = self.buffer.items, .i = self.pos };
             const cp = it.nextCodepoint() orelse return TokenizerError.InvalidUTF8;
+            if (!isValidXmlChar(cp)) {
+                self.emitError(TokenizerError.InvalidCharacter, "Invalid character in XML");
+                return TokenizerError.InvalidCharacter;
+            }
             self.pos = it.i; // advance
             return cp;
+        }
+
+        fn isValidXmlChar(cp: u21) bool {
+            return cp == 0x9 or
+                cp == 0xA or
+                cp == 0xD or
+                (cp >= 0x20 and cp <= 0xD7FF) or
+                (cp >= 0xE000 and cp <= 0xFFFD) or
+                (cp >= 0x10000 and cp <= 0x10FFFF);
         }
 
         // read tag or attribute name
@@ -609,7 +637,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             var name = std.ArrayList(u8).init(self.allocator);
             errdefer name.deinit();
 
-            // ensure we have data n read first char
+            //read first char
             while (true) {
                 if (self.pos >= self.buffer.items.len) {
                     const has_more_data = try self.readNextChunk();
@@ -618,12 +646,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                         return TokenizerError.UnexpectedEOF;
                     }
                 }
-                const first_cp_u32 = try self.decodeUtf8();
-                if (first_cp_u32 > 0x10FFFF) {
-                    self.emitError(TokenizerError.InvalidCharacter, "Invalid Unicode code point");
-                    return TokenizerError.InvalidCharacter;
-                }
-                const first_cp: u21 = @intCast(first_cp_u32);
+                const first_cp = try self.decodeUtf8();
                 if (!isNameStartChar(first_cp)) {
                     self.emitError(TokenizerError.InvalidToken, "Invalid starting character for XML name");
                     return TokenizerError.InvalidToken;
@@ -643,18 +666,13 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                     }
                 }
                 const saved_pos = self.pos;
-                const cp_u32 = self.decodeUtf8() catch |err| {
+                const cp = self.decodeUtf8() catch |err| {
                     if (err == TokenizerError.InvalidUTF8) {
                         self.emitError(TokenizerError.InvalidUTF8, "Invalid UTF-8 sequence in name");
                         return TokenizerError.InvalidUTF8;
                     }
                     return err;
                 };
-                if (cp_u32 > 0x10FFFF) {
-                    self.emitError(TokenizerError.InvalidCharacter, "Invalid Unicode code point");
-                    return TokenizerError.InvalidCharacter;
-                }
-                const cp: u21 = @intCast(cp_u32);
                 if (!isNameChar(cp)) {
                     self.pos = saved_pos; // rewind if not a name char
                     break;
@@ -665,7 +683,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             return try name.toOwnedSlice();
         }
 
-        fn advancePosition(self: *Self, cp: u32) void {
+        fn advancePosition(self: *Self, cp: u21) void {
             if (self.expecting_cr_lf) {
                 self.expecting_cr_lf = false;
                 if (cp == '\n') return;
