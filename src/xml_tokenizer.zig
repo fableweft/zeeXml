@@ -72,6 +72,25 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             };
         }
 
+        fn getErrorContextAt(self: *Self, pos: usize, window_size: usize) ?ErrorContext {
+            if (self.buffer.items.len == 0) return null;
+            const start = if (pos > window_size) pos - window_size else 0;
+            const end = @min(self.buffer.items.len, pos + window_size);
+            const context = self.buffer.items[start..end];
+            const error_offset = pos - start; // offset of error within contex
+            return .{ .context = context, .error_offset = error_offset };
+        }
+
+        pub fn emitErrorAt(self: *Self, kind: TokenizerError, message: []const u8, line: usize, column: usize, context_pos: usize) void {
+            self.last_detailed_error = DetailedError{
+                .kind = kind,
+                .line = line,
+                .column = column,
+                .message = message,
+                .context = self.getErrorContextAt(context_pos, 50),
+            };
+        }
+
         pub const Attribute = struct {
             name: []u8,
             value: []u8,
@@ -306,7 +325,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             self.column += 1;
             const start_line = self.line;
             const start_column = self.column;
-            var value = std.ArrayList(u8).init(self.allocator); //collect raw utf8 bytes
+            var value = std.ArrayList(u8).init(self.allocator); // collect raw utf8 bytes
             errdefer value.deinit();
 
             while (true) {
@@ -318,17 +337,21 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                     }
                 }
 
-                const saved_pos = self.pos; // gotta save pos to capture the bytes of the current char
+                const saved_pos = self.pos;
                 const cp = try self.decodeUtf8();
 
-                // check if reached the closing quote
-                if (cp == @as(u32, quote)) {
+                if (cp == @as(u21, quote)) {
                     return .{ .value = try value.toOwnedSlice(), .start_line = start_line, .start_column = start_column };
+                } else if (cp == '&') {
+                    const entity_start_pos = saved_pos;
+                    const entity_cp = try self.parseEntity(entity_start_pos);
+                    var buf: [4]u8 = undefined;
+                    const len = try std.unicode.utf8Encode(entity_cp, &buf);
+                    try value.appendSlice(buf[0..len]);
+                } else {
+                    try value.appendSlice(self.buffer.items[saved_pos..self.pos]);
+                    self.advancePosition(cp);
                 }
-
-                const char_bytes = self.buffer.items[saved_pos..self.pos];
-                try value.appendSlice(char_bytes);
-                self.advancePosition(cp);
             }
         }
 
@@ -362,7 +385,6 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 if (self.pos >= self.buffer.items.len) {
                     const has_more_data = try self.readNextChunk();
                     if (!has_more_data) {
-                        // gotta allow empty text tokens
                         return Token{ .text = try content.toOwnedSlice() };
                     }
                 }
@@ -371,12 +393,18 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 const cp = try self.decodeUtf8();
 
                 if (cp == '<') {
-                    self.pos = saved_pos; // rewind to let nexttoken handle <
+                    self.pos = saved_pos;
                     return Token{ .text = try content.toOwnedSlice() };
+                } else if (cp == '&') {
+                    const entity_start_pos = saved_pos; // save start of entity position & so that parse entity func can get accurate error location
+                    const entity_cp = try self.parseEntity(entity_start_pos);
+                    var buf: [4]u8 = undefined;
+                    const len = try std.unicode.utf8Encode(entity_cp, &buf);
+                    try content.appendSlice(buf[0..len]);
+                } else {
+                    try content.appendSlice(self.buffer.items[saved_pos..self.pos]);
+                    self.advancePosition(cp);
                 }
-
-                try content.appendSlice(self.buffer.items[saved_pos..self.pos]);
-                self.advancePosition(cp);
             }
         }
 
@@ -537,6 +565,109 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 } else if (cp == ']' and in_subset) {
                     in_subset = false;
                 }
+            }
+        }
+
+        fn parseEntity(self: *Self, entity_start_pos: usize) !u21 {
+            const entity_start_line = self.line;
+            const entity_start_column = self.column;
+
+            // unterminated entity at end of input
+            if (self.pos >= self.buffer.items.len) {
+                self.emitErrorAt(TokenizerError.UnterminatedEntity, "Unterminated entity at end of input", entity_start_line, entity_start_column, entity_start_pos);
+                return TokenizerError.UnterminatedEntity;
+            }
+
+            const first_cp = try self.decodeUtf8();
+            self.advancePosition(first_cp);
+
+            if (first_cp == '#') {
+                // handle numeric entities
+                const is_hex = if (self.pos < self.buffer.items.len and self.buffer.items[self.pos] == 'x') blk: {
+                    self.pos += 1;
+                    self.column += 1;
+                    break :blk true;
+                } else false;
+
+                var num: u32 = 0;
+                var digit_count: usize = 0;
+
+                while (self.pos < self.buffer.items.len) {
+                    const c = self.buffer.items[self.pos];
+                    if (c == ';') {
+                        self.pos += 1;
+                        self.column += 1;
+                        break;
+                    }
+                    if (is_hex and std.ascii.isHex(c)) {
+                        num = num * 16 + @as(u32, std.fmt.charToDigit(c, 16) catch unreachable);
+                    } else if (!is_hex and std.ascii.isDigit(c)) {
+                        num = num * 10 + @as(u32, c - '0');
+                    } else {
+                        // immediate error for invalid chars
+                        self.emitErrorAt(TokenizerError.InvalidEntity, "Invalid character in numeric entity", self.line, self.column, self.pos);
+                        return TokenizerError.InvalidEntity;
+                    }
+                    self.pos += 1;
+                    self.column += 1;
+                    digit_count += 1;
+                }
+
+                // check for unterminated numeric entity
+                if (self.pos >= self.buffer.items.len or self.buffer.items[self.pos - 1] != ';') {
+                    self.emitErrorAt(TokenizerError.UnterminatedEntity, "Unterminated numeric entity", entity_start_line, entity_start_column, entity_start_pos);
+                    return TokenizerError.UnterminatedEntity;
+                }
+
+                // empty numeric entity
+                if (digit_count == 0) {
+                    self.emitErrorAt(TokenizerError.InvalidEntity, "Empty numeric entity", entity_start_line, entity_start_column, entity_start_pos);
+                    return TokenizerError.InvalidEntity;
+                }
+
+                // invalid xml char
+                if (!isValidXmlChar(@intCast(num))) {
+                    self.emitErrorAt(TokenizerError.InvalidEntity, "Numeric entity references invalid XML character", entity_start_line, entity_start_column, entity_start_pos);
+                    return TokenizerError.InvalidEntity;
+                }
+
+                return @intCast(num);
+            } else {
+                // handle named entities
+                var entity_buf: [10]u8 = undefined;
+                var entity_len: usize = 0;
+                entity_buf[entity_len] = @intCast(first_cp);
+                entity_len += 1;
+
+                while (self.pos < self.buffer.items.len and entity_len < 10) {
+                    const c = self.buffer.items[self.pos];
+                    if (c == ';') {
+                        self.pos += 1;
+                        self.column += 1;
+                        break;
+                    }
+                    entity_buf[entity_len] = c;
+                    entity_len += 1;
+                    self.pos += 1;
+                    self.column += 1;
+                }
+
+                // unterminated named entity
+                if (entity_len == 10 or (self.pos >= self.buffer.items.len and self.buffer.items[self.pos - 1] != ';')) {
+                    self.emitErrorAt(TokenizerError.UnterminatedEntity, "Unterminated named entity", entity_start_line, entity_start_column, entity_start_pos);
+                    return TokenizerError.UnterminatedEntity;
+                }
+
+                const entity = entity_buf[0..entity_len];
+                if (std.mem.eql(u8, entity, "amp")) return '&';
+                if (std.mem.eql(u8, entity, "lt")) return '<';
+                if (std.mem.eql(u8, entity, "gt")) return '>';
+                if (std.mem.eql(u8, entity, "apos")) return '\'';
+                if (std.mem.eql(u8, entity, "quot")) return '"';
+
+                // unknown named entity
+                self.emitErrorAt(TokenizerError.InvalidEntity, "Unknown named entity", entity_start_line, entity_start_column, entity_start_pos);
+                return TokenizerError.InvalidEntity;
             }
         }
 
