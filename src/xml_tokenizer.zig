@@ -894,5 +894,40 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 else => false,
             };
         }
+
+        pub fn freeToken(self: *Self, token: Token) void {
+            switch (token) {
+                .start_tag => |tag| {
+                    self.allocator.free(tag.name);
+                    for (tag.attributes) |attr| {
+                        self.allocator.free(attr.name);
+                        self.allocator.free(attr.value);
+                    }
+                    self.allocator.free(tag.attributes);
+                },
+                .end_tag => |name| self.allocator.free(name),
+                .self_closing_tag => |tag| {
+                    self.allocator.free(tag.name);
+                    for (tag.attributes) |attr| {
+                        self.allocator.free(attr.name);
+                        self.allocator.free(attr.value);
+                    }
+                    self.allocator.free(tag.attributes);
+                },
+                .text => |content| self.allocator.free(content),
+                .comment => |content| self.allocator.free(content),
+                .pi => |pi| {
+                    self.allocator.free(pi.target);
+                    self.allocator.free(pi.data);
+                },
+                .cdata => |content| self.allocator.free(content),
+                .doctype => |declaration| self.allocator.free(declaration),
+                .xml_declaration => |xd| {
+                    self.allocator.free(xd.version);
+                    if (xd.encoding) |e| self.allocator.free(e);
+                    if (xd.standalone) |s| self.allocator.free(s);
+                },
+            }
+        }
     };
 }

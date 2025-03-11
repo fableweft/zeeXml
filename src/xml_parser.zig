@@ -242,7 +242,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                 }
                 return null;
             };
-
+            defer self.tokenizer.freeToken(token); // free tokenizer tokens after we done with them
             switch (token) {
                 .start_tag => |tag| {
                     const prefix = getPrefix(tag.name);
