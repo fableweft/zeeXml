@@ -1,6 +1,6 @@
 # zeeXml
 
-A lightweight, non-validating, stream-oriented XML parser written in Zig. zeeXml uses an iterator pattern for explicit control flow, letting you step through XML events (start tags, end tags, text) at your own pace. Perfect for processing large files or streams with minimal memory use and maximum clarity.
+A lightweight, non-validating, stream-oriented XML parser written in Zig. I needed a simple stream-oriented, non-validating XML parser library written in Zig so I made one. UTF-8 support only for now. zeeXml uses an iterator pattern for explicit control flow, letting you step through XML events (start tags, end tags, text) at your own pace. Perfect for processing large files or streams with minimal memory use and maximum clarity.
 
 ## Features
 

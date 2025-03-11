@@ -1,5 +1,5 @@
 const std = @import("std");
-const Parser = @import("xml_parser.zig").xml_parser(std.fs.File.Reader);
+const zeeXml = @import("zeeXml.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
@@ -8,12 +8,12 @@ pub fn main() !void {
     var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
     defer xml_files_dir.close();
 
-    const file = try xml_files_dir.openFile("large-dataset.xml", .{});
+    const file = try xml_files_dir.openFile("15mb.xml", .{});
     defer file.close();
 
     const reader = file.reader();
 
-    var parser = try Parser.init(allocator, reader);
+    var parser = try zeeXml.createParser(allocator, reader);
     defer parser.deinit();
 
     while (true) {
