@@ -1,98 +1,73 @@
 const std = @import("std");
-const Tokenizer = @import("xml_tokenizer.zig").xml_tokenizer(std.fs.File.Reader);
+const Parser = @import("xml_parser.zig").xml_parser(std.fs.File.Reader);
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
-    // defer {
-    //     const leaks = gpa.deinit();
-    //     if (leaks == .leak) {
-    //         std.debug.print("Memory leaks detected!\n", .{});
-    //     } else {
-    //         std.debug.print("No memory leaks.\n", .{});
-    //     }
-    // }
     const allocator = gpa.allocator();
 
     var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
     defer xml_files_dir.close();
 
-    const file = try xml_files_dir.openFile("15mb.xml", .{});
+    const file = try xml_files_dir.openFile("mixed-content.xml", .{});
     defer file.close();
 
     const reader = file.reader();
 
-    var tokenizer = try Tokenizer.init(allocator, reader);
-    defer tokenizer.deinit();
+    var parser = try Parser.init(allocator, reader);
+    defer parser.deinit();
 
     while (true) {
-        const maybe_token = tokenizer.nextToken() catch |err| {
-            if (tokenizer.last_detailed_error) |detailed_err| {
+        const maybe_event = parser.nextEvent() catch |err| {
+            if (parser.last_detailed_error) |detailed_err| {
                 detailed_err.format();
             } else {
-                std.debug.print("Error processing token: {}\n", .{err});
+                std.debug.print("Error processing event: {}\n", .{err});
             }
             return err;
         };
 
-        if (maybe_token) |token| {
-            switch (token) {
-                .start_tag => |st| {
-                    std.debug.print("Start Tag: {s}\n", .{st.name});
-                    for (st.attributes) |attr| {
-                        std.debug.print("  Attribute: {s}=\"{s}\"\n", .{ attr.name, attr.value });
-                        allocator.free(attr.name);
-                        allocator.free(attr.value);
+        if (maybe_event) |event| {
+            switch (event) {
+                .start_element => |se| {
+                    std.debug.print("Start Element: {s}, URI: {?s}\n", .{ se.name, se.uri });
+                    for (se.attributes) |attr| {
+                        std.debug.print("  Attribute: {s}=\"{s}\", URI: {?s}\n", .{ attr.name, attr.value, attr.uri });
                     }
-                    allocator.free(st.name);
-                    allocator.free(st.attributes);
                 },
-                .end_tag => |name| {
-                    std.debug.print("End Tag: {s}\n", .{name});
-                    allocator.free(name);
+                .end_element => |ee| {
+                    std.debug.print("End Element: {s}, URI: {?s}\n", .{ ee.name, ee.uri });
                 },
-                .self_closing_tag => |sct| {
-                    std.debug.print("Self-Closing Tag: {s}\n", .{sct.name});
-                    for (sct.attributes) |attr| {
-                        std.debug.print("  Attribute: {s}=\"{s}\"\n", .{ attr.name, attr.value });
-                        allocator.free(attr.name);
-                        allocator.free(attr.value);
+                .self_closing_element => |sce| {
+                    std.debug.print("Self-Closing Element: {s}, URI: {?s}\n", .{ sce.name, sce.uri });
+                    for (sce.attributes) |attr| {
+                        std.debug.print("  Attribute: {s}=\"{s}\", URI: {?s}\n", .{ attr.name, attr.value, attr.uri });
                     }
-                    allocator.free(sct.name);
-                    allocator.free(sct.attributes);
                 },
                 .text => |text| {
-                    std.debug.print("Text: {s}\n", .{text});
-                    allocator.free(text);
+                    std.debug.print("Text: {s}\n", .{text.content});
                 },
                 .comment => |comment| {
-                    std.debug.print("Comment: {s}\n", .{comment});
-                    allocator.free(comment);
+                    std.debug.print("Comment: {s}\n", .{comment.content});
                 },
-                .pi => |pi| {
+                .processing_instruction => |pi| {
                     std.debug.print("Processing Instruction: target={s}, data={s}\n", .{ pi.target, pi.data });
-                    allocator.free(pi.target);
-                    allocator.free(pi.data);
                 },
                 .cdata => |cdata| {
-                    std.debug.print("CDATA: {s}\n", .{cdata});
-                    allocator.free(cdata);
+                    std.debug.print("CDATA: {s}\n", .{cdata.content});
                 },
                 .doctype => |doctype| {
-                    std.debug.print("DOCTYPE: {s}\n", .{doctype});
-                    allocator.free(doctype);
+                    std.debug.print("DOCTYPE: {s}\n", .{doctype.declaration});
                 },
                 .xml_declaration => |xmldec| {
                     std.debug.print("XML Declaration: version={s}", .{xmldec.version});
                     if (xmldec.encoding) |enc| std.debug.print(", encoding={s}", .{enc});
                     if (xmldec.standalone) |sa| std.debug.print(", standalone={s}", .{sa});
                     std.debug.print("\n", .{});
-                    allocator.free(xmldec.version);
-                    if (xmldec.encoding) |enc| allocator.free(enc);
-                    if (xmldec.standalone) |sa| allocator.free(sa);
                 },
             }
+            parser.freeEvent(event);
         } else {
-            break; // end of file
+            break;
         }
     }
 
