@@ -636,16 +636,25 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 return @intCast(num);
             } else {
                 // handle named entities
-                var entity_buf: [10]u8 = undefined;
+                var entity_buf: [32]u8 = undefined; // Increased from 10 to 32 to handle longer entity names
                 var entity_len: usize = 0;
-                entity_buf[entity_len] = @intCast(first_cp);
-                entity_len += 1;
+                var terminated = false;
 
-                while (self.pos < self.buffer.items.len and entity_len < 10) {
+                // collect the entity name including the first code point
+                if (first_cp <= 0x7F) { // only append if ASCII since entities are ASCII names
+                    entity_buf[entity_len] = @intCast(first_cp);
+                    entity_len += 1;
+                } else {
+                    self.emitErrorAt(TokenizerError.InvalidEntity, "Invalid character in entity name", entity_start_line, entity_start_column, entity_start_pos);
+                    return TokenizerError.InvalidEntity;
+                }
+
+                while (self.pos < self.buffer.items.len and entity_len < 32) {
                     const c = self.buffer.items[self.pos];
                     if (c == ';') {
                         self.pos += 1;
                         self.column += 1;
+                        terminated = true;
                         break;
                     }
                     entity_buf[entity_len] = c;
@@ -654,8 +663,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                     self.column += 1;
                 }
 
-                // unterminated named entity
-                if (entity_len == 10 or (self.pos >= self.buffer.items.len and self.buffer.items[self.pos - 1] != ';')) {
+                if (!terminated) {
                     self.emitErrorAt(TokenizerError.UnterminatedEntity, "Unterminated named entity", entity_start_line, entity_start_column, entity_start_pos);
                     return TokenizerError.UnterminatedEntity;
                 }

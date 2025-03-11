@@ -20,8 +20,14 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             UnboundPrefix,
         };
 
+        // union the error types for DetailedError
+        pub const ErrorKind = union(enum) {
+            tokenizer: Tokenizer(UnderlyingReader).TokenizerError,
+            parser: ParserError,
+        };
+
         pub const DetailedError = struct {
-            kind: ParserError,
+            kind: ErrorKind,
             line: usize,
             column: usize,
             message: []const u8,
@@ -46,7 +52,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
         // stash error with some details just like in tokenizer layer
         fn emitError(self: *Self, kind: ParserError, message: []const u8) void {
             self.last_detailed_error = DetailedError{
-                .kind = kind,
+                .kind = .{ .parser = kind }, // wrap parser error in union
                 .line = self.tokenizer.line,
                 .column = self.tokenizer.column,
                 .message = message,
@@ -235,117 +241,135 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
 
         // get next event
         pub fn nextEvent(self: *Self) !?Event {
-            const token = try self.tokenizer.nextToken() orelse {
+            // try to get the next token but catch any errors from the tokenizer
+            const maybe_token = self.tokenizer.nextToken() catch |err| {
+                if (self.tokenizer.last_detailed_error) |tok_err| {
+                    self.last_detailed_error = .{
+                        .kind = .{ .tokenizer = tok_err.kind },
+                        .line = tok_err.line,
+                        .column = tok_err.column,
+                        .message = tok_err.message,
+                        .context = tok_err.context,
+                    };
+                }
+                return err; // pass error up
+            };
+
+            // if we got a token process it
+            if (maybe_token) |token| {
+                defer self.tokenizer.freeToken(token); //free token when we done with it
+                // handle the token type
+                switch (token) {
+                    .start_tag => |tag| {
+                        const prefix = getPrefix(tag.name);
+                        const local = getLocalName(tag.name);
+
+                        // push new namespace scope n add declarations first
+                        const new_ns = try NamespaceStack.init(self.allocator, self.namespaces);
+                        self.namespaces = new_ns;
+                        try self.addNamespaces(tag.attributes);
+
+                        // then now resolve the uri with updated namespaces
+                        const uri = self.findUri(prefix, false) orelse if (prefix.len > 0) {
+                            self.emitError(ParserError.UnboundPrefix, "Unknown namespace prefix in element");
+                            return ParserError.UnboundPrefix;
+                        } else null;
+
+                        // keep track of open elements for later matching
+                        try self.open_elements.append(.{
+                            .name = try self.allocator.dupe(u8, tag.name),
+                            .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
+                            .local_name = try self.allocator.dupe(u8, local),
+                        });
+
+                        const attrs = try self.makeAttributes(tag.attributes);
+
+                        return Event{ .start_element = .{
+                            .name = try self.allocator.dupe(u8, tag.name),
+                            .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
+                            .local_name = try self.allocator.dupe(u8, local),
+                            .attributes = attrs,
+                        } };
+                    },
+                    .end_tag => |name| {
+                        if (self.open_elements.items.len == 0) {
+                            self.emitError(ParserError.UnexpectedEndTag, "End tag with no open elements");
+                            return ParserError.UnexpectedEndTag;
+                        }
+                        const last = self.open_elements.pop() orelse unreachable;
+                        if (!std.mem.eql(u8, last.name, name)) {
+                            self.emitError(ParserError.MismatchedEndTag, "End tag does not match start tag");
+                            return ParserError.MismatchedEndTag;
+                        }
+                        const old_ns = self.namespaces;
+                        self.namespaces = old_ns.parent orelse unreachable;
+                        old_ns.deinit();
+                        self.allocator.destroy(old_ns);
+
+                        if (self.open_elements.items.len == 0) self.root_closed = true;
+
+                        const event = Event{ .end_element = .{
+                            .name = try self.allocator.dupe(u8, last.name),
+                            .uri = if (last.uri) |u| try self.allocator.dupe(u8, u) else null,
+                            .local_name = try self.allocator.dupe(u8, last.local_name),
+                        } };
+
+                        self.allocator.free(last.name);
+                        if (last.uri) |uri| self.allocator.free(uri);
+                        self.allocator.free(last.local_name);
+
+                        return event;
+                    },
+                    .self_closing_tag => |tag| {
+                        if (self.root_closed) {
+                            self.emitError(ParserError.MultipleRoots, "Extra root element found");
+                            return ParserError.MultipleRoots;
+                        }
+                        const prefix = getPrefix(tag.name);
+                        const local = getLocalName(tag.name);
+                        const uri = self.findUri(prefix, false) orelse if (prefix.len > 0) {
+                            self.emitError(ParserError.UnboundPrefix, "Unknown namespace prefix in element");
+                            return ParserError.UnboundPrefix;
+                        } else null;
+
+                        const temp_ns = try NamespaceStack.init(self.allocator, self.namespaces);
+                        defer {
+                            temp_ns.deinit();
+                            self.allocator.destroy(temp_ns);
+                        }
+                        try self.addNamespaces(tag.attributes);
+                        const attrs = try self.makeAttributes(tag.attributes);
+
+                        if (self.open_elements.items.len == 0) self.root_closed = true;
+
+                        return Event{ .self_closing_element = .{
+                            .name = try self.allocator.dupe(u8, tag.name),
+                            .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
+                            .local_name = try self.allocator.dupe(u8, local),
+                            .attributes = attrs,
+                        } };
+                    },
+                    .text => |content| return Event{ .text = .{ .content = try self.allocator.dupe(u8, content) } },
+                    .comment => |c| return Event{ .comment = .{ .content = try self.allocator.dupe(u8, c) } },
+                    .pi => |pi| return Event{ .processing_instruction = .{
+                        .target = try self.allocator.dupe(u8, pi.target),
+                        .data = try self.allocator.dupe(u8, pi.data),
+                    } },
+                    .cdata => |cd| return Event{ .cdata = .{ .content = try self.allocator.dupe(u8, cd) } },
+                    .doctype => |dt| return Event{ .doctype = .{ .declaration = try self.allocator.dupe(u8, dt) } },
+                    .xml_declaration => |xd| return Event{ .xml_declaration = .{
+                        .version = try self.allocator.dupe(u8, xd.version),
+                        .encoding = if (xd.encoding) |e| try self.allocator.dupe(u8, e) else null,
+                        .standalone = if (xd.standalone) |s| try self.allocator.dupe(u8, s) else null,
+                    } },
+                }
+            } else {
+                //If we got nothing check for unfinished elements
                 if (self.open_elements.items.len > 0) {
                     self.emitError(ParserError.UnexpectedEOF, "End of file with open elements");
                     return ParserError.UnexpectedEOF;
                 }
-                return null;
-            };
-            defer self.tokenizer.freeToken(token); // free tokenizer tokens after we done with them
-            switch (token) {
-                .start_tag => |tag| {
-                    const prefix = getPrefix(tag.name);
-                    const local = getLocalName(tag.name);
-
-                    // push new namespace scope n add declarations first
-                    const new_ns = try NamespaceStack.init(self.allocator, self.namespaces);
-                    self.namespaces = new_ns;
-                    try self.addNamespaces(tag.attributes);
-
-                    // then now resolve the uri with updated namespaces
-                    const uri = self.findUri(prefix, false) orelse if (prefix.len > 0) {
-                        self.emitError(ParserError.UnboundPrefix, "Unknown namespace prefix in element");
-                        return ParserError.UnboundPrefix;
-                    } else null;
-
-                    // keep track of open elements for later matching
-                    try self.open_elements.append(.{
-                        .name = try self.allocator.dupe(u8, tag.name),
-                        .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
-                        .local_name = try self.allocator.dupe(u8, local),
-                    });
-
-                    const attrs = try self.makeAttributes(tag.attributes);
-
-                    return Event{ .start_element = .{
-                        .name = try self.allocator.dupe(u8, tag.name),
-                        .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
-                        .local_name = try self.allocator.dupe(u8, local),
-                        .attributes = attrs,
-                    } };
-                },
-                .end_tag => |name| {
-                    if (self.open_elements.items.len == 0) {
-                        self.emitError(ParserError.UnexpectedEndTag, "End tag with no open elements");
-                        return ParserError.UnexpectedEndTag;
-                    }
-                    const last = self.open_elements.pop() orelse unreachable;
-                    if (!std.mem.eql(u8, last.name, name)) {
-                        self.emitError(ParserError.MismatchedEndTag, "End tag does not match start tag");
-                        return ParserError.MismatchedEndTag;
-                    }
-                    const old_ns = self.namespaces;
-                    self.namespaces = old_ns.parent orelse unreachable;
-                    old_ns.deinit();
-                    self.allocator.destroy(old_ns);
-
-                    if (self.open_elements.items.len == 0) self.root_closed = true;
-
-                    const event = Event{ .end_element = .{
-                        .name = try self.allocator.dupe(u8, last.name),
-                        .uri = if (last.uri) |u| try self.allocator.dupe(u8, u) else null,
-                        .local_name = try self.allocator.dupe(u8, last.local_name),
-                    } };
-
-                    self.allocator.free(last.name);
-                    if (last.uri) |uri| self.allocator.free(uri);
-                    self.allocator.free(last.local_name);
-
-                    return event;
-                },
-                .self_closing_tag => |tag| {
-                    if (self.root_closed) {
-                        self.emitError(ParserError.MultipleRoots, "Extra root element found");
-                        return ParserError.MultipleRoots;
-                    }
-                    const prefix = getPrefix(tag.name);
-                    const local = getLocalName(tag.name);
-                    const uri = self.findUri(prefix, false) orelse if (prefix.len > 0) {
-                        self.emitError(ParserError.UnboundPrefix, "Unknown namespace prefix in element");
-                        return ParserError.UnboundPrefix;
-                    } else null;
-
-                    const temp_ns = try NamespaceStack.init(self.allocator, self.namespaces);
-                    defer {
-                        temp_ns.deinit();
-                        self.allocator.destroy(temp_ns);
-                    }
-                    try self.addNamespaces(tag.attributes);
-                    const attrs = try self.makeAttributes(tag.attributes);
-
-                    if (self.open_elements.items.len == 0) self.root_closed = true;
-
-                    return Event{ .self_closing_element = .{
-                        .name = try self.allocator.dupe(u8, tag.name),
-                        .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
-                        .local_name = try self.allocator.dupe(u8, local),
-                        .attributes = attrs,
-                    } };
-                },
-                .text => |content| return Event{ .text = .{ .content = try self.allocator.dupe(u8, content) } },
-                .comment => |c| return Event{ .comment = .{ .content = try self.allocator.dupe(u8, c) } },
-                .pi => |pi| return Event{ .processing_instruction = .{
-                    .target = try self.allocator.dupe(u8, pi.target),
-                    .data = try self.allocator.dupe(u8, pi.data),
-                } },
-                .cdata => |cd| return Event{ .cdata = .{ .content = try self.allocator.dupe(u8, cd) } },
-                .doctype => |dt| return Event{ .doctype = .{ .declaration = try self.allocator.dupe(u8, dt) } },
-                .xml_declaration => |xd| return Event{ .xml_declaration = .{
-                    .version = try self.allocator.dupe(u8, xd.version),
-                    .encoding = if (xd.encoding) |e| try self.allocator.dupe(u8, e) else null,
-                    .standalone = if (xd.standalone) |s| try self.allocator.dupe(u8, s) else null,
-                } },
+                return null; // Done, no more events
             }
         }
     };
