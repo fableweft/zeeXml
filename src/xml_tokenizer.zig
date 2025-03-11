@@ -131,6 +131,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         }
 
         pub fn readNextChunk(self: *Self) !bool {
+            // If all data has been processed reset the buffer
             if (self.pos >= self.buffer.items.len) {
                 try self.buffer.resize(0);
                 self.pos = 0;
@@ -143,15 +144,16 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 self.pos = 0;
             }
 
-            try self.buffer.ensureUnusedCapacity(default_chunk_size);
+            const end_pos = self.buffer.items.len; // length of unprocessed data
+            const space_to_read = 8192 - end_pos; // max new data to keep total at 8192
 
-            // read new data into buffer starting at the current end
-            const end_pos = self.buffer.items.len;
-            const available_space = self.buffer.capacity - end_pos;
-            const read_slice = self.buffer.allocatedSlice()[end_pos..][0..@min(available_space, default_chunk_size)];
+            // if no space is left we cant read more without going above 8KB
+            if (space_to_read == 0) return true; // buffer full process it first
+
+            // read new data into remaining space
+            const read_slice = self.buffer.allocatedSlice()[end_pos..][0..space_to_read];
             const bytes_read = try self.buffered_reader.reader().read(read_slice);
-
-            if (bytes_read == 0) return false;
+            if (bytes_read == 0) return false; // end of file
 
             // resize buffer to include the newly read data
             try self.buffer.resize(end_pos + bytes_read);
