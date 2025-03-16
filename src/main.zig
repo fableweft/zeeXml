@@ -8,7 +8,7 @@ pub fn main() !void {
     var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
     defer xml_files_dir.close();
 
-    const file = try xml_files_dir.openFile("15mb.xml", .{});
+    const file = try xml_files_dir.openFile("138-KB-XML-File.xml", .{});
     defer file.close();
 
     const reader = file.reader();

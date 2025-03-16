@@ -1,6 +1,6 @@
 .{
     .name = .zeeXml,
-    .version = "0.0.0",
+    .version = "1.0.0",
     .fingerprint = 0xb0a9379973373519,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{},
