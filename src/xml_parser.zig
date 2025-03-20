@@ -7,7 +7,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
     return struct {
         allocator: std.mem.Allocator,
         tokenizer: Tokenizer(UnderlyingReader),
-        open_elements: std.ArrayList(Element),
+        open_elements: std.ArrayListUnmanaged(Element),
         namespaces: *NamespaceStack,
         root_closed: bool,
         last_detailed_error: ?DetailedError,
@@ -20,7 +20,6 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             UnboundPrefix,
         };
 
-        // union the error types for DetailedError
         pub const ErrorKind = union(enum) {
             tokenizer: Tokenizer(UnderlyingReader).TokenizerError,
             parser: ParserError,
@@ -69,14 +68,14 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
 
         // namespace stack
         const NamespaceStack = struct {
-            bindings: std.StringHashMap([]const u8),
+            bindings: std.StringHashMapUnmanaged([]const u8),
             parent: ?*NamespaceStack,
             allocator: std.mem.Allocator,
 
             fn init(allocator: std.mem.Allocator, parent: ?*NamespaceStack) !*NamespaceStack {
                 const ns = try allocator.create(NamespaceStack);
                 ns.* = .{
-                    .bindings = std.StringHashMap([]const u8).init(allocator),
+                    .bindings = .{},
                     .parent = parent,
                     .allocator = allocator,
                 };
@@ -89,7 +88,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                     self.allocator.free(entry.key_ptr.*);
                     self.allocator.free(entry.value_ptr.*);
                 }
-                self.bindings.deinit();
+                self.bindings.deinit(self.allocator);
             }
 
             fn find(self: *const NamespaceStack, prefix: []const u8) ?[]const u8 {
@@ -101,7 +100,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             fn add(self: *NamespaceStack, prefix: []const u8, uri: []const u8) !void {
                 const prefix_copy = try self.allocator.dupe(u8, prefix);
                 const uri_copy = try self.allocator.dupe(u8, uri);
-                try self.bindings.put(prefix_copy, uri_copy);
+                try self.bindings.put(self.allocator, prefix_copy, uri_copy);
             }
         };
 
@@ -112,7 +111,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             return .{
                 .allocator = allocator,
                 .tokenizer = try Tokenizer(UnderlyingReader).init(allocator, reader),
-                .open_elements = std.ArrayList(Element).init(allocator),
+                .open_elements = .empty,
                 .namespaces = root_ns,
                 .root_closed = false,
                 .last_detailed_error = null,
@@ -125,7 +124,8 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                 if (elem.uri) |uri| self.allocator.free(uri);
                 self.allocator.free(elem.local_name);
             }
-            self.open_elements.deinit();
+
+            self.open_elements.deinit(self.allocator);
 
             var current_ns = self.namespaces;
             while (true) {
@@ -239,9 +239,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             }
         }
 
-        // get next event
         pub fn nextEvent(self: *Self) !?Event {
-            // try to get the next token but catch any errors from the tokenizer
             const maybe_token = self.tokenizer.nextToken() catch |err| {
                 if (self.tokenizer.last_detailed_error) |tok_err| {
                     self.last_detailed_error = .{
@@ -252,13 +250,12 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                         .context = tok_err.context,
                     };
                 }
-                return err; // pass error up
+                return err;
             };
 
             // if we got a token process it
             if (maybe_token) |token| {
                 defer self.tokenizer.freeToken(token); //free token when we done with it
-                // handle the token type
                 switch (token) {
                     .start_tag => |tag| {
                         const prefix = getPrefix(tag.name);
@@ -276,7 +273,7 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                         } else null;
 
                         // keep track of open elements for later matching
-                        try self.open_elements.append(.{
+                        try self.open_elements.append(self.allocator, .{
                             .name = try self.allocator.dupe(u8, tag.name),
                             .uri = if (uri) |u| try self.allocator.dupe(u8, u) else null,
                             .local_name = try self.allocator.dupe(u8, local),
@@ -364,12 +361,12 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
                     } },
                 }
             } else {
-                //If we got nothing check for unfinished elements
+                //if we got nothing check for unfinished elements
                 if (self.open_elements.items.len > 0) {
                     self.emitError(ParserError.UnexpectedEOF, "End of file with open elements");
                     return ParserError.UnexpectedEOF;
                 }
-                return null; // Done, no more events
+                return null; // done no more events
             }
         }
     };

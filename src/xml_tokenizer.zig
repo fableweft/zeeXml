@@ -4,7 +4,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
     return struct {
         buffered_reader: std.io.BufferedReader(8192, UnderlyingReader), // 8KB buffered reader
         allocator: std.mem.Allocator,
-        buffer: std.ArrayList(u8),
+        buffer: std.ArrayListUnmanaged(u8),
         line: usize,
         column: usize,
         pos: usize,
@@ -115,7 +115,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             return Self{
                 .buffered_reader = std.io.bufferedReaderSize(default_chunk_size, underlying_reader),
                 .allocator = allocator,
-                .buffer = try std.ArrayList(u8).initCapacity(allocator, default_chunk_size),
+                .buffer = try std.ArrayListUnmanaged(u8).initCapacity(allocator, default_chunk_size),
                 .line = 1,
                 .column = 1,
                 .pos = 0,
@@ -123,7 +123,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.buffer.deinit();
+            self.buffer.deinit(self.allocator);
         }
 
         pub fn reader(self: *Self) std.io.BufferedReader(default_chunk_size, UnderlyingReader).Reader {
@@ -131,32 +131,30 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
         }
 
         pub fn readNextChunk(self: *Self) !bool {
-            // If all data has been processed reset the buffer
+            // if all data has been processed reset the buffer
             if (self.pos >= self.buffer.items.len) {
-                try self.buffer.resize(0);
+                try self.buffer.resize(self.allocator, 0);
                 self.pos = 0;
             }
             // if there is unprocessed data shift it to beginning
             else if (self.pos > 0) {
                 const remaining = self.buffer.items[self.pos..];
                 std.mem.copyForwards(u8, self.buffer.items[0..remaining.len], remaining);
-                try self.buffer.resize(remaining.len);
+                try self.buffer.resize(self.allocator, remaining.len);
                 self.pos = 0;
             }
 
-            const end_pos = self.buffer.items.len; // length of unprocessed data
-            const space_to_read = 8192 - end_pos; // max new data to keep total at 8192
+            const end_pos = self.buffer.items.len;
+            const space_to_read = 8192 - end_pos;
 
             // if no space is left we cant read more without going above 8KB
             if (space_to_read == 0) return true; // buffer full process it first
 
-            // read new data into remaining space
             const read_slice = self.buffer.allocatedSlice()[end_pos..][0..space_to_read];
             const bytes_read = try self.buffered_reader.reader().read(read_slice);
             if (bytes_read == 0) return false; // end of file
 
-            // resize buffer to include the newly read data
-            try self.buffer.resize(end_pos + bytes_read);
+            try self.buffer.resize(self.allocator, end_pos + bytes_read);
             return true;
         }
 
@@ -164,7 +162,6 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             return self.buffer.items;
         }
 
-        // get the next token from the XML stream or return null at EOF
         pub fn nextToken(self: *Self) !?Token {
             try self.skipWhitespace();
             if (self.pos >= self.buffer.items.len) {

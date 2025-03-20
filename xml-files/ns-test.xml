@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sample XML with namespaces -->
+<root xmlns="http://default.com" xmlns:ns="http://example.com" xmlns:xml="http://www.w3.org/XML/1998/namespace">
+    <child attr="plain" ns:attr="namespaced">
+        <ns:subchild>Text content</ns:subchild>
+        <nested xml:space="preserve">  Preserved whitespace  </nested>
+    </child>
+    <ns:other id="123">Other text</ns:other>
+    <empty ns:flag="true" />
+</root>

@@ -6,9 +6,6 @@
 /debug/
 /build/
 
-# XML files directory
-/xml-files
-
 # bnaries and executables
 *.exe
 *.o
