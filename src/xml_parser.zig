@@ -4,6 +4,8 @@ const Event = @import("xml_event.zig").xml_event;
 const Attribute = @import("xml_event.zig").Attribute;
 
 pub fn xml_parser(comptime UnderlyingReader: type) type {
+    const log = std.log.scoped(.xml_parser);
+
     return struct {
         allocator: std.mem.Allocator,
         tokenizer: Tokenizer(UnderlyingReader),
@@ -32,31 +34,37 @@ pub fn xml_parser(comptime UnderlyingReader: type) type {
             message: []const u8,
             context: ?Tokenizer(UnderlyingReader).ErrorContext,
 
-            pub fn format(self: DetailedError) void {
-                std.debug.print("XML parse error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
+            pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                _ = fmt;
+                _ = options;
+                try writer.print("XML parse error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
                 if (self.context) |ctx| {
-                    std.debug.print("Context: \"", .{});
+                    try writer.writeAll("Context: \"");
                     for (ctx.context, 0..) |char, i| {
                         if (i == ctx.error_offset) {
-                            std.debug.print("[{c}]", .{char});
+                            try writer.print("[{c}]", .{char});
                         } else {
-                            std.debug.print("{c}", .{char});
+                            try writer.print("{c}", .{char});
                         }
                     }
-                    std.debug.print("\"\n", .{});
+                    try writer.writeAll("\"\n");
                 }
             }
         };
 
-        // stash error with some details just like in tokenizer layer
-        fn emitError(self: *Self, kind: ParserError, message: []const u8) void {
+        fn setAndLogError(self: *Self, kind: ErrorKind, message: []const u8, line: usize, column: usize, context: ?Tokenizer(UnderlyingReader).ErrorContext) void {
             self.last_detailed_error = DetailedError{
-                .kind = .{ .parser = kind }, // wrap parser error in union
-                .line = self.tokenizer.line,
-                .column = self.tokenizer.column,
+                .kind = kind,
+                .line = line,
+                .column = column,
                 .message = message,
-                .context = self.tokenizer.getErrorContext(50),
+                .context = context,
             };
+            log.err("{}", .{self.last_detailed_error.?});
+        }
+
+        fn emitError(self: *Self, kind: ParserError, message: []const u8) void {
+            self.setAndLogError(.{ .parser = kind }, message, self.tokenizer.line, self.tokenizer.column, self.tokenizer.getErrorContext(50));
         }
 
         // Element tracked in open_elements

@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
+    const log = std.log.scoped(.xml_tokenizer);
+
     return struct {
         buffered_reader: std.io.BufferedReader(8192, UnderlyingReader), // 8KB buffered reader
         allocator: std.mem.Allocator,
@@ -36,18 +38,20 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
             message: []const u8,
             context: ?ErrorContext,
 
-            pub fn format(self: DetailedError) void {
-                std.debug.print("XML error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
+            pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                _ = fmt;
+                _ = options;
+                try writer.print("XML tokenization error at line {d}, column {d}: {s}\n", .{ self.line, self.column, self.message });
                 if (self.context) |ctx| {
-                    std.debug.print("Context: \"", .{});
+                    try writer.writeAll("Context: \"");
                     for (ctx.context, 0..) |char, i| {
                         if (i == ctx.error_offset) {
-                            std.debug.print("[{c}]", .{char});
+                            try writer.print("[{c}]", .{char});
                         } else {
-                            std.debug.print("{c}", .{char});
+                            try writer.print("{c}", .{char});
                         }
                     }
-                    std.debug.print("\"\n", .{});
+                    try writer.writeAll("\"\n");
                 }
             }
         };
@@ -70,6 +74,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 .message = message,
                 .context = self.getErrorContext(50),
             };
+            log.err("{}", .{self.last_detailed_error.?});
         }
 
         fn getErrorContextAt(self: *Self, pos: usize, window_size: usize) ?ErrorContext {
@@ -89,6 +94,7 @@ pub fn xml_tokenizer(comptime UnderlyingReader: type) type {
                 .message = message,
                 .context = self.getErrorContextAt(context_pos, 50),
             };
+            log.err("{}", .{self.last_detailed_error.?});
         }
 
         pub const Attribute = struct {

@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<!-- This sample XML file is provided by Sample-Files.com. Visit us for more sample files and resources. -->
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<!-- This sample  XML file is provided by Sample-Files.com. Visit us for more sample files and resources. -->
 <root>
   <person>
     <name>John Doe</name>

@@ -19,7 +19,7 @@ pub fn main() !void {
     while (true) {
         const maybe_event = parser.nextEvent() catch |err| {
             if (parser.last_detailed_error) |detailed_err| {
-                detailed_err.format();
+                std.debug.print("{}", .{detailed_err});
             } else {
                 std.debug.print("Error processing event: {}\n", .{err});
             }
