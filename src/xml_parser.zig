@@ -1,3 +1,6 @@
+//TODO add string interning
+// add tests
+
 const std = @import("std");
 const Tokenizer = @import("xml_tokenizer.zig").xml_tokenizer;
 const Event = @import("xml_event.zig").xml_event;

@@ -8,7 +8,7 @@ pub fn main() !void {
     var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
     defer xml_files_dir.close();
 
-    const file = try xml_files_dir.openFile("basic-structure.xml", .{});
+    const file = try xml_files_dir.openFile("large-dataset.xml", .{});
     defer file.close();
 
     const reader = file.reader();
