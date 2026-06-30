@@ -1,17 +1,21 @@
 const std = @import("std");
 const zeeXml = @import("zeeXml.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var xml_files_dir = try std.fs.cwd().openDir("xml-files", .{});
-    defer xml_files_dir.close();
+    var cwd_dir = std.Io.Dir.cwd();
 
-    const file = try xml_files_dir.openFile("basic-structure.xml", .{});
-    defer file.close();
+    var xml_files_dir = try cwd_dir.openDir(io, "xml-files", .{});
+    defer xml_files_dir.close(io);
 
-    const reader = file.reader();
+    const file = try xml_files_dir.openFile(io, "basic-structure.xml", .{});
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+
+    const reader = file.reader(io, &buf);
 
     var parser = try zeeXml.createParser(allocator, reader);
     defer parser.deinit();
