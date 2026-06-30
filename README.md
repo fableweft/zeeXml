@@ -11,3 +11,5 @@ A lightweight, non-validating, stream-oriented XML parser written in Zig. I need
 - **Memory Efficient**: Process XML documents of any size with minimal memory overhead
 - **Zig-Native**: Built with Zig's safety features and performance characteristics
 - **Zero External Dependencies**
+
+** Will revisit when zig gets to v1. Too many api changes lol
