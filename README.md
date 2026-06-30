@@ -12,4 +12,4 @@ A lightweight, non-validating, stream-oriented XML parser written in Zig. I need
 - **Zig-Native**: Built with Zig's safety features and performance characteristics
 - **Zero External Dependencies**
 
-** Will revisit when zig gets to v1. Too many api changes lol
+** Will revisit when zig gets to v1. Too many api changes lol **
